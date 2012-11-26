@@ -42,7 +42,7 @@
 #define USB_MODEL_NAME			"Mockup"
 #define USB_MODEL_VERSION		""
 
-#define NUM_PROBES			8
+#define NUM_PROBES			32
 #define TRIGGER_TYPES			"01"
 #define SDRAM_SIZE			(8 * 1024 * 1024)
 #define MIN_NUM_SAMPLES			1
