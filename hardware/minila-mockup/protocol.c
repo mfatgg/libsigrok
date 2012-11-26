@@ -33,8 +33,18 @@ SR_PRIV const char *minila_probe_names[NUM_PROBES + 1] = {
 	NULL,
 };
 
+   // timebase divider coeficients for version 100MHz
+SR_PRIV uint64_t minila_timebase_table_100[32] = {
+          1,       2,       5,      10,      20,      50,
+        100,     200,     500,    1000,    2000,    5000,
+      10000,   20000,   50000,  100000,  200000,  500000,
+    1000000, 2000000, 5000000,10000000,       2,       2,
+          2, 	   2,       2,       2,       2,       2,
+	  2,       2
+};
+
 /* This will be initialized via hw_info_get()/SR_DI_SAMPLERATES. */
-SR_PRIV uint64_t minila_supported_samplerates[255 + 1] = { 0 };
+SR_PRIV uint64_t minila_supported_samplerates[33] = { 0 };
 
 /*
  * Min: 1 sample per 0.01us -> sample time is 0.084s, samplerate 100MHz
@@ -65,9 +75,9 @@ SR_PRIV void minila_fill_supported_samplerates_if_needed(void)
 		return;
 
 	/* Fill supported_samplerates[] with the proper values. */
-	for (i = 0; i < 255; i++)
-		minila_supported_samplerates[254 - i] = SR_MHZ(100) / (i + 1);
-	minila_supported_samplerates[255] = 0;
+	for (i = 0; i < 32; i++)
+		minila_supported_samplerates[i] = SR_MHZ(100) /
+			minila_timebase_table_100[i];
 }
 
 /**
@@ -82,7 +92,7 @@ SR_PRIV int minila_is_valid_samplerate(uint64_t samplerate)
 
 	minila_fill_supported_samplerates_if_needed();
 
-	for (i = 0; i < 255; i++) {
+	for (i = 0; i < 33; i++) {
 		if (minila_supported_samplerates[i] == samplerate)
 			return 1;
 	}
