@@ -27,9 +27,9 @@
 /* Probes are numbered 0-31. */
 SR_PRIV const char *minila_probe_names[NUM_PROBES + 1] = {
 	"0", "1", "2", "3", "4", "5", "6", "7",
-//	"8", "9", "10", "11", "12", "13", "14", "15",
-//	"16", "17", "18", "19", "20", "21", "22", "23",
-//	"24", "25", "26", "27", "28", "29", "30", "31",
+	"8", "9", "10", "11", "12", "13", "14", "15",
+	"16", "17", "18", "19", "20", "21", "22", "23",
+	"24", "25", "26", "27", "28", "29", "30", "31",
 	NULL,
 };
 
@@ -335,6 +335,8 @@ SR_PRIV int minila_configure_probes(const struct sr_dev_inst *sdi)
 	devc->trigger_pattern = 0;
 	devc->trigger_mask = 0; /* Default to "don't care" for all probes. */
 
+	sr_dbg("entering minila_configure_probes");
+
 	for (l = sdi->probes; l; l = l->next) {
 		probe = (struct sr_probe *)l->data;
 
@@ -556,7 +558,8 @@ SR_PRIV void minila_send_block_to_session_bus(struct dev_context *devc, int bloc
 		packet.type = SR_DF_LOGIC;
 		packet.payload = &logic;
 		logic.length = BS;
-		logic.unitsize = 1;
+		logic.unitsize = ((NUM_PROBES-1) / 8) + 1;
+		sr_dbg("unitsize = %d", logic.unitsize);
 		logic.data = devc->final_buf + (block * BS);
 		sr_session_send(devc->session_dev_id, &packet);
 		return;

@@ -42,13 +42,13 @@
 #define USB_MODEL_NAME			"Mockup"
 #define USB_MODEL_VERSION		""
 
-#define NUM_PROBES			8
+#define NUM_PROBES			32
 #define TRIGGER_TYPES			"01"
 #define SDRAM_SIZE			(2 * 1024 * 1024)
 #define MIN_NUM_SAMPLES			1
 
 #define BS				4096 /* Block size */
-#define NUM_BLOCKS			16 /* Number of blocks */
+#define NUM_BLOCKS			1 /* Number of blocks */
 
 /* Private, per-device-instance driver context. */
 struct dev_context {
