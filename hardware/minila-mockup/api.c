@@ -105,7 +105,6 @@ static GSList *hw_scan(GSList *options)
 	devc->limit_msec = 0;
 	devc->limit_samples = 0;
 	devc->session_dev_id = NULL;
-	memset(devc->mangled_buf, 0, BS);
 	devc->final_buf = NULL;
 	devc->trigger_pattern = 0x00; /* Value irrelevant, see trigger_mask. */
 	devc->trigger_mask = 0x00; /* All probes are "don't care". */
@@ -117,7 +116,7 @@ static GSList *hw_scan(GSList *options)
 	devc->usb_pid = 0;
 
 	/* Allocate memory where we'll store the de-mangled data. */
-	if (!(devc->final_buf = g_try_malloc(SDRAM_SIZE))) {
+	if (!(devc->final_buf = g_try_malloc(BS))) {
 		sr_err("final_buf malloc failed.");
 		goto err_free_devc;
 	}
@@ -234,17 +233,14 @@ static int hw_dev_open(struct sr_dev_inst *sdi)
 	}
 	sr_dbg("FTDI flow control enabled successfully.");
 
-	//res := Set_USB_Device_LatencyTimer(16);
-	//res := Set_USB_Device_BitMode($00,$00); 		// reset controller
-	//res := Set_USB_Device_BitMode($00,$08); 		// enable Host Bus Emulation
-	//res := Set_USB_Device_Timeouts(1000,1000); 		// enable Host Bus Emulation
-//	if ((ret = ftdi_set_latency_timer(devc->ftdic, 16)) < 0) {
-//		sr_err("%s: ftdi_set_latency_timer: (%d) %s",
-//		       __func__, ret, ftdi_get_error_string(devc->ftdic));
-//		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
-//		goto err_dev_open_close_ftdic;
-//	}
-//	sr_dbg("FTDI latency set to 16 successfully.");
+	if ((ret = ftdi_set_latency_timer(devc->ftdic, 16)) < 0) {
+		sr_err("%s: ftdi_set_latency_timer: (%d) %s",
+		       __func__, ret, ftdi_get_error_string(devc->ftdic));
+		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
+		goto err_dev_open_close_ftdic;
+	}
+	sr_dbg("FTDI latency set to 16 successfully.");
+
 	if ((ret = ftdi_set_bitmode(devc->ftdic, 0, BITMODE_MCU)) < 0) {
 		sr_err("%s: ftdi_set_bitmode: (%d) %s",
 		       __func__, ret, ftdi_get_error_string(devc->ftdic));
@@ -422,6 +418,8 @@ static int receive_data(int fd, int revents, void *cb_data)
 		return FALSE;
 	}
 
+	minila_send_block_to_session_bus(devc, devc->block_counter);
+
 	/* We need to get exactly NUM_BLOCKS blocks (i.e. 8MB) of data. */
 	if (devc->block_counter != (NUM_BLOCKS - 1)) {
 		devc->block_counter++;
@@ -431,8 +429,8 @@ static int receive_data(int fd, int revents, void *cb_data)
 	sr_dbg("Sampling finished, sending data to session bus now.");
 
 	/* All data was received and demangled, send it to the session bus. */
-	for (i = 0; i < NUM_BLOCKS; i++)
-		minila_send_block_to_session_bus(devc, i);
+//	for (i = 0; i < NUM_BLOCKS; i++)
+//		minila_send_block_to_session_bus(devc, i);
 
 	hw_dev_acquisition_stop(sdi, sdi);
 

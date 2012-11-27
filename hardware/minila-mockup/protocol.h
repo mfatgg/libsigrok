@@ -44,7 +44,6 @@
 
 #define NUM_PROBES			32
 #define TRIGGER_TYPES			"01"
-#define SDRAM_SIZE			(2 * 1024 * 1024)
 #define MIN_NUM_SAMPLES			1
 
 #define BS				4096 /* Block size */
@@ -68,14 +67,8 @@ struct dev_context {
 	void *session_dev_id;
 
 	/**
-	 * A buffer containing some (mangled) samples from the device.
-	 * Format: Pretty mangled-up (due to hardware reasons), see code.
-	 */
-	uint8_t mangled_buf[BS];
-
-	/**
-	 * An 8MB buffer where we'll store the de-mangled samples.
-	 * Format: Each sample is 1 byte, MSB is channel 7, LSB is channel 0.
+	 * A buffer containing some samples from the device.
+	 * Format: Each sample is 4 byte, MSB of byte 3 is channel 31, LSB of byte 0 is channel 0.
 	 */
 	uint8_t *final_buf;
 

@@ -237,7 +237,7 @@ SR_PRIV int minila_close(struct dev_context *devc)
 SR_PRIV int minila_close_usb_reset_sequencer(struct dev_context *devc)
 {
 	/* Magic sequence of bytes for resetting the MINILA sequencer logic. */
-	uint8_t buf[8] = {0x93, 0x00, 0x00, 0x40, 0x93, 0x00, 0x00, 0x40};
+	uint8_t buf[7] = {0x93, 0x00, 0x00, 0x40, 0x92, 0x00, 0x00};
 	int ret;
 
 	if (!devc) {
@@ -253,7 +253,7 @@ SR_PRIV int minila_close_usb_reset_sequencer(struct dev_context *devc)
 	if (devc->ftdic->usb_dev) {
 		/* Reset the MINILA sequencer logic, then wait 100ms. */
 		sr_dbg("Resetting sequencer logic.");
-		(void) minila_write(devc, buf, 8); /* Ignore errors. */
+		(void) minila_write(devc, buf, 7); /* Ignore errors. */
 		g_usleep(100 * 1000);
 
 		/* Purge FTDI buffers, then reset and close the FTDI device. */
@@ -418,9 +418,10 @@ SR_PRIV int minila_set_samplerate(const struct sr_dev_inst *sdi, uint64_t sample
 SR_PRIV int minila_read_block(struct dev_context *devc)
 {
 	int i, j, byte_offset, m, mi, p, index, bytes_read, bytes_written;
-	int bytes_remaining, bytes_read_total;
+	int bytes_remaining, bytes_read_total, ret;
 	time_t now;
-	uint8_t buf[1 + 2*256 + 1];
+	#define chunksize 256
+	static uint8_t buf[1 + 2*chunksize + 1];
 
 	/* Note: Caller checked that devc and devc->ftdic != NULL. */
 
@@ -432,6 +433,7 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 	/* If first block read got 0 bytes, retry until success or timeout. */
 	//if ((bytes_read == 0) && (devc->block_counter == 0)) {
 	if (devc->block_counter == 0) {
+		sr_dbg("block_counter = %d", devc->block_counter);
 		do {
 			/* Read status register 2 */
 			buf[0] = 0x91;  // CPUMode Read Extended Address
@@ -463,32 +465,34 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 			/* TODO: How to handle read errors here? */
 			//now = time(NULL);
 		} while ((devc->done > now) && !(buf[0] & 0x80));
-	}
-
-	bytes_read_total = 0;
-	// read chunks of 256 bytes
-	for (j=0; j<BS; j+=256) {
 
 		buf[0] = 0x91;  // CPUMode Read Extended Address
 		buf[1] = 0x01;  // addr_high = 1 to switch from writing to reading
 		buf[2] = 0x00;  // addr_low = data register
-		for (i=1; i<256; i++) {
+		for (i=1; i<chunksize; i++) {
 			/* Read 32-bit (1 dataword) of sampled data */
 			buf[1 + 2*i] = 0x90;
 			buf[1 + 2*i + 1] = 0x00;
 		}
-		buf[1 + 2*256] = 0x87;
-		bytes_written = minila_write(devc, buf, 1 + 2*256 + 1);
+		buf[1 + 2*chunksize] = 0x87;
+
+	}
+
+	// read chunks of 256 bytes
+	bytes_read_total = 0;
+	for (j=0; j<BS; j+=chunksize) {
+
+		bytes_written = minila_write(devc, buf, 1 + 2*chunksize + 1);
 		//sr_dbg("bytes written: %d", bytes_written);
 
-		bytes_remaining = 256;
+		bytes_remaining = chunksize;
 		do {
-			bytes_read = minila_read(devc, &devc->mangled_buf[j], bytes_remaining);
+			bytes_read = minila_read(devc, &devc->final_buf[j], bytes_remaining);
 			bytes_remaining -= bytes_read;
 			bytes_read_total += bytes_read;
 			now = time(NULL);
 		} while ((devc->done > now) && (bytes_remaining > 0));
-		//sr_dbg("bytes read: %d", bytes_read);
+		//sr_dbg("bytes read: %d", bytes_read_total);
 	}
 
 	/* Check if block read was successful or a timeout occured. */
@@ -498,20 +502,6 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 		return SR_ERR;
 	}
 
-	/* De-mangle the data. */
-	memcpy(devc->final_buf, devc->mangled_buf, BS);
-	/*sr_spew("Demangling block %d.", devc->block_counter);
-	byte_offset = devc->block_counter * BS;
-	m = byte_offset / (1024 * 1024);
-	mi = m * (1024 * 1024);
-	for (i = 0; i < BS; i++) {
-		p = i & (1 << 0);
-		index = m * 2 + (((byte_offset + i) - mi) / 2) * 16;
-		index += (devc->divcount == 0) ? p : (1 - p);
-		devc->final_buf[index] = devc->mangled_buf[i];
-	}*/
-
-	//sr_dbg("end of demangling");
 	return SR_OK;
 }
 
@@ -527,28 +517,28 @@ SR_PRIV void minila_send_block_to_session_bus(struct dev_context *devc, int bloc
 
 	/* Check if we can find the trigger condition in this block. */
 	trigger_point = -1;
-	expected_sample = devc->trigger_pattern & devc->trigger_mask;
-	for (i = 0; i < BS; i++) {
-		/* Don't continue if the trigger was found previously. */
-		if (devc->trigger_found)
-			break;
-
-		/*
-		 * Also, don't continue if triggers are "don't care", i.e. if
-		 * no trigger conditions were specified by the user. In that
-		 * case we don't want to send an SR_DF_TRIGGER packet at all.
-		 */
-		if (devc->trigger_mask == 0x00)
-			break;
-
-		sample = *(devc->final_buf + (block * BS) + i);
-
-		if ((sample & devc->trigger_mask) == expected_sample) {
-			trigger_point = i;
-			devc->trigger_found = 1;
-			break;
-		}
-	}
+//	expected_sample = devc->trigger_pattern & devc->trigger_mask;
+//	for (i = 0; i < BS; i++) {
+//		/* Don't continue if the trigger was found previously. */
+//		if (devc->trigger_found)
+//			break;
+//
+//		/*
+//		 * Also, don't continue if triggers are "don't care", i.e. if
+//		 * no trigger conditions were specified by the user. In that
+//		 * case we don't want to send an SR_DF_TRIGGER packet at all.
+//		 */
+//		if (devc->trigger_mask == 0x00)
+//			break;
+//
+//		sample = *(devc->final_buf + (block * BS) + i);
+//
+//		if ((sample & devc->trigger_mask) == expected_sample) {
+//			trigger_point = i;
+//			devc->trigger_found = 1;
+//			break;
+//		}
+//	}
 
 	/* If no trigger was found, send one SR_DF_LOGIC packet. */
 	if (trigger_point == -1) {
@@ -560,7 +550,7 @@ SR_PRIV void minila_send_block_to_session_bus(struct dev_context *devc, int bloc
 		logic.length = BS;
 		logic.unitsize = ((NUM_PROBES-1) / 8) + 1;
 		sr_dbg("unitsize = %d", logic.unitsize);
-		logic.data = devc->final_buf + (block * BS);
+		logic.data = devc->final_buf;
 		sr_session_send(devc->session_dev_id, &packet);
 		return;
 	}
@@ -574,37 +564,37 @@ SR_PRIV void minila_send_block_to_session_bus(struct dev_context *devc, int bloc
 
 	/* TODO: Send SR_DF_TRIGGER packet before or after the actual sample? */
 
-	/* If at least one sample is located before the trigger... */
-	if (trigger_point > 0) {
-		/* Send pre-trigger SR_DF_LOGIC packet to the session bus. */
-		sr_spew("Sending pre-trigger SR_DF_LOGIC packet, "
-			"start = %d, length = %d.", block * BS, trigger_point);
-		packet.type = SR_DF_LOGIC;
-		packet.payload = &logic;
-		logic.length = trigger_point;
-		logic.unitsize = 1;
-		logic.data = devc->final_buf + (block * BS);
-		sr_session_send(devc->session_dev_id, &packet);
-	}
+//	/* If at least one sample is located before the trigger... */
+//	if (trigger_point > 0) {
+//		/* Send pre-trigger SR_DF_LOGIC packet to the session bus. */
+//		sr_spew("Sending pre-trigger SR_DF_LOGIC packet, "
+//			"start = %d, length = %d.", block * BS, trigger_point);
+//		packet.type = SR_DF_LOGIC;
+//		packet.payload = &logic;
+//		logic.length = trigger_point;
+//		logic.unitsize = 1;
+//		logic.data = devc->final_buf;
+//		sr_session_send(devc->session_dev_id, &packet);
+//	}
 
-	/* Send the SR_DF_TRIGGER packet to the session bus. */
-	sr_spew("Sending SR_DF_TRIGGER packet, sample = %d.",
-		(block * BS) + trigger_point);
-	packet.type = SR_DF_TRIGGER;
-	packet.payload = NULL;
-	sr_session_send(devc->session_dev_id, &packet);
+//	/* Send the SR_DF_TRIGGER packet to the session bus. */
+//	sr_spew("Sending SR_DF_TRIGGER packet, sample = %d.",
+//		(block * BS) + trigger_point);
+//	packet.type = SR_DF_TRIGGER;
+//	packet.payload = NULL;
+//	sr_session_send(devc->session_dev_id, &packet);
 
-	/* If at least one sample is located after the trigger... */
-	if (trigger_point < (BS - 1)) {
-		/* Send post-trigger SR_DF_LOGIC packet to the session bus. */
-		sr_spew("Sending post-trigger SR_DF_LOGIC packet, "
-			"start = %d, length = %d.",
-			(block * BS) + trigger_point, BS - trigger_point);
-		packet.type = SR_DF_LOGIC;
-		packet.payload = &logic;
-		logic.length = BS - trigger_point;
-		logic.unitsize = 1;
-		logic.data = devc->final_buf + (block * BS) + trigger_point;
-		sr_session_send(devc->session_dev_id, &packet);
-	}
+//	/* If at least one sample is located after the trigger... */
+//	if (trigger_point < (BS - 1)) {
+//		/* Send post-trigger SR_DF_LOGIC packet to the session bus. */
+//		sr_spew("Sending post-trigger SR_DF_LOGIC packet, "
+//			"start = %d, length = %d.",
+//			(block * BS) + trigger_point, BS - trigger_point);
+//		packet.type = SR_DF_LOGIC;
+//		packet.payload = &logic;
+//		logic.length = BS - trigger_point;
+//		logic.unitsize = 1;
+//		logic.data = devc->final_buf + trigger_point;
+//		sr_session_send(devc->session_dev_id, &packet);
+//	}
 }
