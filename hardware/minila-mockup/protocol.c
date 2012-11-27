@@ -23,13 +23,16 @@
  *
  * - verify received data with minila windows program + known hardware pattern on input
  * - separate WriteReg and ReadReg for FTDI
+ * - use StatusRegister bits of MINILA
+ * - correct sram read behavior (see uCommunication.pas -> ReadSRAM of orig minila source code)
+ * - correct reset behavior (see dlgIO_USB.pas -> Sync_To_MPSSE of orig minila source code)
  * - triggers
  * - "done" timing for dev_context
  * - get rid of goto's
  * -
- * - fix vcd file writing?
- * - more hwcaps
- * - other minila versions (normal, other than 100 MHz)
+ * - fix vcd file writing? (32th channel wrong in gtkwave)
+ * - more hwcaps support
+ * - other minila versions (orig; other than 100 MHz)
  */
 
 #include <ftdi.h>
