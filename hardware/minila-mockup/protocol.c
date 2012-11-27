@@ -27,9 +27,9 @@
 /* Probes are numbered 0-31. */
 SR_PRIV const char *minila_probe_names[NUM_PROBES + 1] = {
 	"0", "1", "2", "3", "4", "5", "6", "7",
-	"8", "9", "10", "11", "12", "13", "14", "15",
-	"16", "17", "18", "19", "20", "21", "22", "23",
-	"24", "25", "26", "27", "28", "29", "30", "31",
+//	"8", "9", "10", "11", "12", "13", "14", "15",
+//	"16", "17", "18", "19", "20", "21", "22", "23",
+//	"24", "25", "26", "27", "28", "29", "30", "31",
 	NULL,
 };
 
@@ -237,7 +237,7 @@ SR_PRIV int minila_close(struct dev_context *devc)
 SR_PRIV int minila_close_usb_reset_sequencer(struct dev_context *devc)
 {
 	/* Magic sequence of bytes for resetting the MINILA sequencer logic. */
-	uint8_t buf[8] = {0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01};
+	uint8_t buf[8] = {0x93, 0x00, 0x00, 0x40, 0x93, 0x00, 0x00, 0x40};
 	int ret;
 
 	if (!devc) {
@@ -415,34 +415,90 @@ SR_PRIV int minila_set_samplerate(const struct sr_dev_inst *sdi, uint64_t sample
  */
 SR_PRIV int minila_read_block(struct dev_context *devc)
 {
-	int i, byte_offset, m, mi, p, index, bytes_read;
+	int i, j, byte_offset, m, mi, p, index, bytes_read, bytes_written;
+	int bytes_remaining, bytes_read_total;
 	time_t now;
+	uint8_t buf[1 + 2*256 + 1];
 
 	/* Note: Caller checked that devc and devc->ftdic != NULL. */
 
 	sr_spew("Reading block %d.", devc->block_counter);
 
-	bytes_read = minila_read(devc, devc->mangled_buf, BS);
+
+	//bytes_read = minila_read(devc, devc->mangled_buf, BS);
 
 	/* If first block read got 0 bytes, retry until success or timeout. */
-	if ((bytes_read == 0) && (devc->block_counter == 0)) {
+	//if ((bytes_read == 0) && (devc->block_counter == 0)) {
+	if (devc->block_counter == 0) {
 		do {
-			sr_spew("Reading block 0 (again).");
-			bytes_read = minila_read(devc, devc->mangled_buf, BS);
+			/* Read status register 2 */
+			buf[0] = 0x91;  // CPUMode Read Extended Address
+			buf[1] = 0x01;  // addr_high = 1 to switch from writing to reading
+			buf[2] = 0x03;  // addr_low = status register 2
+			buf[3] = 0x87;  // immediate read return value
+			bytes_written = minila_write(devc, buf, 4);
+			if (bytes_written != 4) {
+				sr_err("Acquisition failed to start: %d.", bytes_written);
+				return SR_ERR;
+			}
+			do {
+				bytes_read = minila_read(devc, buf, 1);
+				now = time(NULL);
+			} while ((devc->done > now) && (bytes_read == 0));
+			sr_dbg("MINILA Status register 2: 0x%02x", buf[0]);
+
+			/* Write command: enable autoincrement */
+			if (buf[0] & 0x80) {
+				buf[0] = 0x93;
+				buf[1] = 0x00;
+				buf[2] = 0x00;
+				buf[3] = 0x10;
+				bytes_written = minila_write(devc, buf, 4);
+			}
+
+			//sr_spew("Reading block 0 (again).");
+			//bytes_read = minila_read(devc, devc->mangled_buf, BS);
 			/* TODO: How to handle read errors here? */
+			//now = time(NULL);
+		} while ((devc->done > now) && !(buf[0] & 0x80));
+	}
+
+	bytes_read_total = 0;
+	// read chunks of 256 bytes
+	for (j=0; j<BS; j+=256) {
+
+		buf[0] = 0x91;  // CPUMode Read Extended Address
+		buf[1] = 0x01;  // addr_high = 1 to switch from writing to reading
+		buf[2] = 0x00;  // addr_low = data register
+		for (i=1; i<256; i++) {
+			/* Read 32-bit (1 dataword) of sampled data */
+			buf[1 + 2*i] = 0x90;
+			buf[1 + 2*i + 1] = 0x00;
+		}
+		buf[1 + 2*256] = 0x87;
+		bytes_written = minila_write(devc, buf, 1 + 2*256 + 1);
+		//sr_dbg("bytes written: %d", bytes_written);
+
+		bytes_remaining = 256;
+		do {
+			bytes_read = minila_read(devc, &devc->mangled_buf[j], bytes_remaining);
+			bytes_remaining -= bytes_read;
+			bytes_read_total += bytes_read;
 			now = time(NULL);
-		} while ((devc->done > now) && (bytes_read == 0));
+		} while ((devc->done > now) && (bytes_remaining > 0));
+		//sr_dbg("bytes read: %d", bytes_read);
 	}
 
 	/* Check if block read was successful or a timeout occured. */
-	if (bytes_read != BS) {
-		sr_err("Trigger timed out. Bytes read: %d.", bytes_read);
+	if (bytes_read_total != BS) {
+		sr_err("Trigger timed out. Bytes read: %d.", bytes_read_total);
 		(void) minila_reset(devc); /* Ignore errors. */
 		return SR_ERR;
 	}
 
 	/* De-mangle the data. */
-	sr_spew("Demangling block %d.", devc->block_counter);
+	memcpy(devc->final_buf, devc->mangled_buf, BS);
+	/*sr_spew("Demangling block %d.", devc->block_counter);
 	byte_offset = devc->block_counter * BS;
 	m = byte_offset / (1024 * 1024);
 	mi = m * (1024 * 1024);
@@ -451,8 +507,9 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 		index = m * 2 + (((byte_offset + i) - mi) / 2) * 16;
 		index += (devc->divcount == 0) ? p : (1 - p);
 		devc->final_buf[index] = devc->mangled_buf[i];
-	}
+	}*/
 
+	//sr_dbg("end of demangling");
 	return SR_OK;
 }
 
