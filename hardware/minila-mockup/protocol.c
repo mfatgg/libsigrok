@@ -487,7 +487,7 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 
 		bytes_remaining = chunksize;
 		do {
-			bytes_read = minila_read(devc, &devc->final_buf[j], bytes_remaining);
+			bytes_read = minila_read(devc, &devc->block_buf[j], bytes_remaining);
 			bytes_remaining -= bytes_read;
 			bytes_read_total += bytes_read;
 			now = time(NULL);
@@ -501,6 +501,9 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 		(void) minila_reset(devc); /* Ignore errors. */
 		return SR_ERR;
 	}
+
+	/* create final buffer with all sampled data */
+	memcpy(devc->final_buf + (devc->block_counter * BS), devc->block_buf, BS);
 
 	return SR_OK;
 }
@@ -559,7 +562,7 @@ SR_PRIV void minila_send_block_to_session_bus(struct dev_context *devc, int bloc
 		sr_dbg("length = %d", logic.length);
 		logic.unitsize = BYTES_PER_SAMPLE;
 		sr_dbg("unitsize = %d", logic.unitsize);
-		logic.data = devc->final_buf;
+		logic.data = devc->final_buf + (block * BS);
 		sr_session_send(devc->session_dev_id, &packet);
 		return;
 	}

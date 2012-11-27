@@ -103,7 +103,8 @@ static GSList *hw_scan(GSList *options)
 	devc->ftdic = NULL;
 	devc->cur_samplerate = SR_MHZ(100); /* 100MHz == max. samplerate */
 	devc->limit_msec = 0;
-	devc->limit_samples = 0;
+	devc->limit_samples = MAX_NUM_SAMPLES;
+	devc->limit_blocks = NUM_BLOCKS;
 	devc->session_dev_id = NULL;
 	devc->final_buf = NULL;
 	devc->trigger_pattern = 0x00; /* Value irrelevant, see trigger_mask. */
@@ -115,16 +116,10 @@ static GSList *hw_scan(GSList *options)
 	devc->divcount = 0; /* 10ns sample period == 100MHz samplerate */
 	devc->usb_pid = 0;
 
-	/* Allocate memory where we'll store the de-mangled data. */
-	if (!(devc->final_buf = g_try_malloc(BS))) {
-		sr_err("final_buf malloc failed.");
-		goto err_free_devc;
-	}
-
 	/* Allocate memory for the FTDI context (ftdic) and initialize it. */
 	if (!(devc->ftdic = ftdi_new())) {
 		sr_err("%s: ftdi_new failed.", __func__);
-		goto err_free_final_buf;
+		goto err_free_devc;
 	}
 
 	/* Check for the device and temporarily open it. */
@@ -174,8 +169,6 @@ err_close_ftdic:
 	(void) minila_close(devc); /* Log, but ignore errors. */
 err_free_ftdic:
 	free(devc->ftdic); /* NOT g_free()! */
-err_free_final_buf:
-	g_free(devc->final_buf);
 err_free_devc:
 	g_free(devc);
 err_free_nothing:
@@ -282,9 +275,6 @@ static int hw_dev_close(struct sr_dev_inst *sdi)
 
 	sdi->status = SR_ST_INACTIVE;
 
-	sr_dbg("Freeing sample buffer.");
-	g_free(devc->final_buf);
-
 	return SR_OK;
 }
 
@@ -374,8 +364,10 @@ static int hw_dev_config_set(const struct sr_dev_inst *sdi, int hwcap,
 			sr_err("%s: LIMIT_SAMPLES too small.", __func__);
 			return SR_ERR;
 		}
-		if (*(const uint64_t *)value > MAX_NUM_SAMPLES)
+		if (*(const uint64_t *)value > MAX_NUM_SAMPLES) {
 			sr_err("%s: LIMIT_SAMPLES exceeds hw max", __func__);
+			return SR_ERR;
+		}
 		devc->limit_samples = *(const uint64_t *)value;
 		sr_dbg("LIMIT_SAMPLES = %" PRIu64, devc->limit_samples);
 		devc->limit_blocks = (((devc->limit_samples * BYTES_PER_SAMPLE)-1) / BS) + 1;
@@ -415,14 +407,24 @@ static int receive_data(int fd, int revents, void *cb_data)
 		return FALSE;
 	}
 
+	if (devc->block_counter == 0) {
+		sr_dbg("Malloc final_buf, bytes: %d", devc->limit_blocks * BS);
+		/* Allocate memory where we'll store the de-mangled data. */
+		if (!(devc->final_buf = g_try_malloc(devc->limit_blocks * BS))) {
+			sr_err("final_buf malloc failed.");
+			hw_dev_acquisition_stop(sdi, sdi);
+			return FALSE;
+		}
+		/* init sample memory with default value */
+		memset(devc->final_buf, 0, devc->limit_blocks * BS);
+	}
+
 	/* Get one block of data. */
 	if ((ret = minila_read_block(devc)) < 0) {
 		sr_err("%s: minila_read_block error: %d.", __func__, ret);
 		hw_dev_acquisition_stop(sdi, sdi);
 		return FALSE;
 	}
-
-	minila_send_block_to_session_bus(devc, devc->block_counter);
 
 	/* We need to get exactly NUM_BLOCKS blocks (i.e. 8MB) of data. */
 	if (devc->block_counter != (devc->limit_blocks - 1)) {
@@ -433,10 +435,12 @@ static int receive_data(int fd, int revents, void *cb_data)
 	sr_dbg("Sampling finished, sending data to session bus now.");
 
 	/* All data was received and demangled, send it to the session bus. */
-//	for (i = 0; i < NUM_BLOCKS; i++)
-//		minila_send_block_to_session_bus(devc, i);
+	for (i = 0; i < devc->limit_blocks; i++)
+		minila_send_block_to_session_bus(devc, i);
 
 	hw_dev_acquisition_stop(sdi, sdi);
+
+	g_free(devc->final_buf);
 
 	return TRUE;
 }

@@ -46,12 +46,13 @@
 #define TRIGGER_TYPES			"01"
 #define MIN_NUM_SAMPLES			1
 
+#define SRAM_SIZE			(512 * 1024)
 #define BS				256 /* Block size */
-#define NUM_BLOCKS			8192 /* Number of blocks */
 
 
-#define MAX_NUM_SAMPLES			(BS * NUM_BLOCKS)
 #define BYTES_PER_SAMPLE		(((NUM_PROBES-1) / 8) + 1)
+#define NUM_BLOCKS			(SRAM_SIZE / BS) /* Number of blocks */
+#define MAX_NUM_SAMPLES			(SRAM_SIZE / BYTES_PER_SAMPLE)
 
 /* Private, per-device-instance driver context. */
 struct dev_context {
@@ -74,6 +75,10 @@ struct dev_context {
 	/**
 	 * A buffer containing some samples from the device.
 	 * Format: Each sample is 4 byte, MSB of byte 3 is channel 31, LSB of byte 0 is channel 0.
+	 */
+	uint8_t block_buf[BS];
+	/**
+	 * Buffer containing all samples read from device
 	 */
 	uint8_t *final_buf;
 
