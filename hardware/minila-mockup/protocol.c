@@ -18,6 +18,20 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
  */
 
+/*
+ * TODO:
+ *
+ * - verify received data with minila windows program + known hardware pattern on input
+ * - separate WriteReg and ReadReg for FTDI
+ * - triggers
+ * - "done" timing for dev_context
+ * - get rid of goto's
+ * -
+ * - fix vcd file writing?
+ * - more hwcaps
+ * - other minila versions (normal, other than 100 MHz)
+ */
+
 #include <ftdi.h>
 #include <glib.h>
 #include "libsigrok.h"
