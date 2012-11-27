@@ -46,8 +46,12 @@
 #define TRIGGER_TYPES			"01"
 #define MIN_NUM_SAMPLES			1
 
-#define BS				4096 /* Block size */
-#define NUM_BLOCKS			1 /* Number of blocks */
+#define BS				256 /* Block size */
+#define NUM_BLOCKS			8192 /* Number of blocks */
+
+
+#define MAX_NUM_SAMPLES			(BS * NUM_BLOCKS)
+#define BYTES_PER_SAMPLE		(((NUM_PROBES-1) / 8) + 1)
 
 /* Private, per-device-instance driver context. */
 struct dev_context {
@@ -62,6 +66,7 @@ struct dev_context {
 
 	/** The current sampling limit (in number of samples). */
 	uint64_t limit_samples;
+	int limit_blocks;  // limit_samples*4 / BS
 
 	/** TODO */
 	void *session_dev_id;

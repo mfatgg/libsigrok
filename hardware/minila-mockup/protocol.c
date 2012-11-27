@@ -62,7 +62,7 @@ SR_PRIV const int minila_hwcaps[] = {
 	SR_HWCAP_LOGIC_ANALYZER,
 	SR_HWCAP_SAMPLERATE,
 	SR_HWCAP_LIMIT_MSEC, /* TODO: Not yet implemented. */
-	SR_HWCAP_LIMIT_SAMPLES, /* TODO: Not yet implemented. */
+	SR_HWCAP_LIMIT_SAMPLES,
 	0,
 };
 
@@ -547,8 +547,17 @@ SR_PRIV void minila_send_block_to_session_bus(struct dev_context *devc, int bloc
 		        "block %d.", BS, block);
 		packet.type = SR_DF_LOGIC;
 		packet.payload = &logic;
-		logic.length = BS;
-		logic.unitsize = ((NUM_PROBES-1) / 8) + 1;
+		/* last block? */
+		if (block == (devc->limit_blocks - 1)) {
+			logic.length = (devc->limit_samples * BYTES_PER_SAMPLE) % BS;
+			if (logic.length == 0) {
+				logic.length = BS;
+			}
+		} else {
+			logic.length = BS;
+		}
+		sr_dbg("length = %d", logic.length);
+		logic.unitsize = BYTES_PER_SAMPLE;
 		sr_dbg("unitsize = %d", logic.unitsize);
 		logic.data = devc->final_buf;
 		sr_session_send(devc->session_dev_id, &packet);

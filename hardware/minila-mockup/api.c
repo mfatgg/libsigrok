@@ -374,8 +374,12 @@ static int hw_dev_config_set(const struct sr_dev_inst *sdi, int hwcap,
 			sr_err("%s: LIMIT_SAMPLES too small.", __func__);
 			return SR_ERR;
 		}
+		if (*(const uint64_t *)value > MAX_NUM_SAMPLES)
+			sr_err("%s: LIMIT_SAMPLES exceeds hw max", __func__);
 		devc->limit_samples = *(const uint64_t *)value;
 		sr_dbg("LIMIT_SAMPLES = %" PRIu64, devc->limit_samples);
+		devc->limit_blocks = (((devc->limit_samples * BYTES_PER_SAMPLE)-1) / BS) + 1;
+		sr_dbg("LIMIT_BLOCKS = %" PRIu64, devc->limit_blocks);
 		break;
 	default:
 		/* Unknown capability, return SR_ERR. */
@@ -421,7 +425,7 @@ static int receive_data(int fd, int revents, void *cb_data)
 	minila_send_block_to_session_bus(devc, devc->block_counter);
 
 	/* We need to get exactly NUM_BLOCKS blocks (i.e. 8MB) of data. */
-	if (devc->block_counter != (NUM_BLOCKS - 1)) {
+	if (devc->block_counter != (devc->limit_blocks - 1)) {
 		devc->block_counter++;
 		return TRUE;
 	}
