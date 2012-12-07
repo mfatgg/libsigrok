@@ -109,14 +109,14 @@ SR_PRIV int minila_is_valid_samplerate(uint64_t samplerate)
 
 	minila_fill_supported_samplerates_if_needed();
 
-	for (i = 0; i < 33; i++) {
+	for (i = 0; i < 32; i++) {
 		if (minila_supported_samplerates[i] == samplerate)
-			return 1;
+			return i;
 	}
 
 	sr_err("Invalid samplerate (%" PRIu64 "Hz).", samplerate);
 
-	return 0;
+	return -1;
 }
 
 /**
@@ -129,19 +129,22 @@ SR_PRIV int minila_is_valid_samplerate(uint64_t samplerate)
  * @param samplerate The samplerate in Hz.
  * @return The divcount value as needed by the hardware, or 0xff upon errors.
  */
-SR_PRIV uint8_t minila_samplerate_to_divcount(uint64_t samplerate)
+SR_PRIV uint8_t minila_samplerate_to_index(uint64_t samplerate)
 {
+	int index;
+
 	if (samplerate == 0) {
 		sr_err("%s: samplerate was 0.", __func__);
 		return 0xff;
 	}
 
-	if (!minila_is_valid_samplerate(samplerate)) {
+	index = minila_is_valid_samplerate(samplerate);
+	if (index == -1) {
 		sr_err("%s: Can't get divcount, samplerate invalid.", __func__);
 		return 0xff;
 	}
 
-	return (SR_MHZ(100) / samplerate) - 1;
+	return (uint8_t)index;
 }
 
 /**

@@ -107,8 +107,8 @@ struct dev_context {
 	/** Counter/index for the data block to be read. */
 	int block_counter;
 
-	/** The divcount value (determines the sample period) for the MINILA. */
-	uint8_t divcount;
+	/** The samplerate index (selects the sample period) for the MINILA. */
+	uint8_t samplerate_index;
 
 	/** This MiniLa's USB PID (multiple versions exist). */
 	uint16_t usb_pid;
@@ -121,7 +121,7 @@ extern SR_PRIV const char *minila_probe_names[];
 extern const struct sr_samplerates minila_samplerates;
 SR_PRIV void minila_fill_supported_samplerates_if_needed(void);
 SR_PRIV int minila_is_valid_samplerate(uint64_t samplerate);
-SR_PRIV uint8_t minila_samplerate_to_divcount(uint64_t samplerate);
+SR_PRIV uint8_t minila_samplerate_to_index(uint64_t samplerate);
 SR_PRIV int minila_write(struct dev_context *devc, uint8_t *buf, int size);
 SR_PRIV int minila_write_async(struct dev_context *devc, uint8_t *buf, int size);
 SR_PRIV int minila_write_async_complete(struct dev_context *devc, int wait_for_more);

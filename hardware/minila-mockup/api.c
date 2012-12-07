@@ -113,7 +113,7 @@ static GSList *hw_scan(GSList *options)
 	devc->trigger_found = 0;
 	devc->done = 0;
 	devc->block_counter = 0;
-	devc->divcount = 0; /* 10ns sample period == 100MHz samplerate */
+	devc->samplerate_index = 0; /* 10ns sample period == 100MHz samplerate */
 	devc->usb_pid = 0;
 
 	/* Allocate memory for the FTDI context (ftdic) and initialize it. */
@@ -467,9 +467,9 @@ static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi,
 		return SR_ERR_BUG;
 	}
 
-	devc->divcount = minila_samplerate_to_divcount(devc->cur_samplerate);
-	if (devc->divcount == 0xff) {
-		sr_err("%s: Invalid divcount/samplerate.", __func__);
+	devc->samplerate_index = minila_samplerate_to_index(devc->cur_samplerate);
+	if (devc->samplerate_index == 0xff) {
+		sr_err("%s: Invalid samplerate index.", __func__);
 		return SR_ERR;
 	}
 
@@ -496,7 +496,8 @@ static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi,
 	/* Timebase command (Timeanalysis firmware only) */
 	buf[10] = 0x92;
 	buf[11] = 0x03;
-	buf[12] = 0x00;  // 100 MHz samplerate
+	buf[12] = devc->samplerate_index;  // samplerate select
+	sr_dbg("MINILA Samplerate select: %d", devc->samplerate_index);
 	/* Trigger pre/post command */
 	buf[13] = 0x92;
 	buf[14] = 0x04;
@@ -591,7 +592,7 @@ static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi,
 	sr_session_send(devc->session_dev_id, &packet);
 
 	/* Time when we should be done (for detecting trigger timeouts). */
-	devc->done = (devc->divcount + 1) * 0.08388608 + time(NULL)
+	devc->done = (SR_MHZ(100) / devc->cur_samplerate) * 0.08388608 + time(NULL)
 			+ devc->trigger_timeout;
 	devc->block_counter = 0;
 	devc->trigger_found = 0;
