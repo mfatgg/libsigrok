@@ -46,8 +46,8 @@
 #define TRIGGER_TYPES			"01"
 #define MIN_NUM_SAMPLES			1
 
-#define SRAM_SIZE			(512 * 1024)
-#define BS				256 /* Block size */
+#define SRAM_SIZE			(4 * 512 * 1024)
+#define BS				4096 /* Block size */
 
 
 #define BYTES_PER_SAMPLE		(((NUM_PROBES-1) / 8) + 1)
@@ -123,6 +123,8 @@ SR_PRIV void minila_fill_supported_samplerates_if_needed(void);
 SR_PRIV int minila_is_valid_samplerate(uint64_t samplerate);
 SR_PRIV uint8_t minila_samplerate_to_divcount(uint64_t samplerate);
 SR_PRIV int minila_write(struct dev_context *devc, uint8_t *buf, int size);
+SR_PRIV int minila_write_async(struct dev_context *devc, uint8_t *buf, int size);
+SR_PRIV int minila_write_async_complete(struct dev_context *devc, int wait_for_more);
 SR_PRIV int minila_read(struct dev_context *devc, uint8_t *buf, int size);
 SR_PRIV int minila_close(struct dev_context *devc);
 SR_PRIV int minila_close_usb_reset_sequencer(struct dev_context *devc);

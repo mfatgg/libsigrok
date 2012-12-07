@@ -184,6 +184,42 @@ SR_PRIV int minila_write(struct dev_context *devc, uint8_t *buf, int size)
 	return bytes_written;
 }
 
+SR_PRIV int minila_write_async(struct dev_context *devc, uint8_t *buf, int size)
+{
+	int bytes_written;
+
+	/* Note: Caller checked that devc and devc->ftdic != NULL. */
+
+	if (!buf) {
+		sr_err("%s: buf was NULL.", __func__);
+		return SR_ERR_ARG;
+	}
+
+	if (size < 0) {
+		sr_err("%s: size was < 0.", __func__);
+		return SR_ERR_ARG;
+	}
+
+	bytes_written = ftdi_write_data_async(devc->ftdic, buf, size);
+
+	if (bytes_written < 0) {
+		sr_err("%s: ftdi_write_data: (%d) %s.", __func__,
+		       bytes_written, ftdi_get_error_string(devc->ftdic));
+		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
+	} else if (bytes_written != size) {
+		sr_err("%s: bytes to write: %d, bytes written: %d.",
+		       __func__, size, bytes_written);
+		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
+	}
+
+	return bytes_written;
+}
+
+SR_PRIV void minila_async_complete(struct dev_context *devc, int wait_for_more)
+{
+	ftdi_async_complete(devc->ftdic, wait_for_more);
+}
+
 /**
  * Read a certain amount of bytes from the MINILA's FTDI device.
  *
@@ -437,8 +473,7 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 	int i, j, byte_offset, m, mi, p, index, bytes_read, bytes_written;
 	int bytes_remaining, bytes_read_total, ret;
 	time_t now;
-	#define chunksize 256
-	static uint8_t buf[1 + 2*chunksize + 1];
+	static uint8_t buf[1 + 2*BS + 1];
 
 	/* Note: Caller checked that devc and devc->ftdic != NULL. */
 
@@ -486,31 +521,31 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 		buf[0] = 0x91;  // CPUMode Read Extended Address
 		buf[1] = 0x01;  // addr_high = 1 to switch from writing to reading
 		buf[2] = 0x00;  // addr_low = data register
-		for (i=1; i<chunksize; i++) {
+		for (i=1; i<BS; i++) {
 			/* Read 32-bit (1 dataword) of sampled data */
 			buf[1 + 2*i] = 0x90;
 			buf[1 + 2*i + 1] = 0x00;
 		}
-		buf[1 + 2*chunksize] = 0x87;
+		buf[1 + 2*BS] = 0x87;
 
 	}
 
 	// read chunks of 256 bytes
 	bytes_read_total = 0;
-	for (j=0; j<BS; j+=chunksize) {
 
-		bytes_written = minila_write(devc, buf, 1 + 2*chunksize + 1);
-		//sr_dbg("bytes written: %d", bytes_written);
+	bytes_written = minila_write_async(devc, buf, 1 + 2*BS + 1);
+	//sr_dbg("bytes written: %d", bytes_written);
 
-		bytes_remaining = chunksize;
-		do {
-			bytes_read = minila_read(devc, &devc->block_buf[j], bytes_remaining);
-			bytes_remaining -= bytes_read;
-			bytes_read_total += bytes_read;
-			now = time(NULL);
-		} while ((devc->done > now) && (bytes_remaining > 0));
-		//sr_dbg("bytes read: %d", bytes_read_total);
-	}
+	bytes_remaining = BS;
+	do {
+		bytes_read = minila_read(devc, &devc->block_buf[j], bytes_remaining);
+		bytes_remaining -= bytes_read;
+		bytes_read_total += bytes_read;
+		now = time(NULL);
+	} while ((devc->done > now) && (bytes_remaining > 0));
+	//sr_dbg("bytes read: %d", bytes_read_total);
+
+	minila_async_complete(devc, 0);
 
 	/* Check if block read was successful or a timeout occured. */
 	if (bytes_read_total != BS) {
