@@ -78,7 +78,7 @@ const struct sr_samplerates minila_samplerates = {
 SR_PRIV const int minila_hwcaps[] = {
 	SR_HWCAP_LOGIC_ANALYZER,
 	SR_HWCAP_SAMPLERATE,
-	SR_HWCAP_LIMIT_MSEC, /* TODO: Not yet implemented. */
+	//SR_HWCAP_LIMIT_MSEC, /* TODO: Not yet implemented. */
 	SR_HWCAP_LIMIT_SAMPLES,
 	0,
 };
