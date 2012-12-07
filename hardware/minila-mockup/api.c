@@ -452,10 +452,6 @@ static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi,
 	struct sr_datafeed_packet packet;
 	struct sr_datafeed_header header;
 	struct sr_datafeed_meta_logic meta;
-	uint8_t buf[128];
-	int bytes_written, bytes_read;
-	int i;
-	time_t done, now;
 
 	if (!(devc = sdi->priv)) {
 		sr_err("%s: sdi->priv was NULL.", __func__);
@@ -480,97 +476,7 @@ static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi,
 
 	sr_dbg("Starting acquisition.");
 
-	/* Reset command */
-	buf[0] = 0x93;
-	buf[1] = 0x00;
-	buf[2] = 0x00;
-	buf[3] = 0x40;
-	/* Trigger events counter command */
-	buf[4] = 0x92;
-	buf[5] = 0x01;
-	buf[6] = 0x00;  // 1 trigger hit
-	/* Trigger length counter command */
-	buf[7] = 0x92;
-	buf[8] = 0x02;
-	buf[9] = 0x01;  // min. trigger length = 1 clk
-	/* Timebase command (Timeanalysis firmware only) */
-	buf[10] = 0x92;
-	buf[11] = 0x03;
-	buf[12] = devc->samplerate_index;  // samplerate select
-	sr_dbg("MINILA Samplerate select: %d", devc->samplerate_index);
-	/* Trigger pre/post command */
-	buf[13] = 0x92;
-	buf[14] = 0x04;
-	buf[15] = 0x1f;  // no pretrigger, 512k posttrigger
-	/* Trigger value x7:x0 command */
-	buf[16] = 0x92;
-	buf[17] = 0x05;
-	buf[18] = 0x00;  // compare inputs with 0x00
-	/* Trigger value x15:x8 command */
-	buf[19] = 0x92;
-	buf[20] = 0x06;
-	buf[21] = 0x00;  // compare inputs with 0x00
-	/* Trigger edge e15:e8 command */
-	buf[22] = 0x92;
-	buf[23] = 0x07;
-	buf[24] = 0x00;  // compare inputs with using value (not edge)
-	/* Trigger edge e7:e0 command */
-	buf[25] = 0x92;
-	buf[26] = 0x08;
-	buf[27] = 0x00;  // compare inputs with using value (not edge)
-	/* Trigger mask m15:m8 command */
-	buf[28] = 0x92;
-	buf[29] = 0x09;
-	buf[30] = 0x00;  // ignore all input bits
-	/* Trigger mask m7:m0 command */
-	buf[31] = 0x92;
-	buf[32] = 0x0a;
-	buf[33] = 0x00;  // ignore all input bits
-	/* Trigger control command */
-	buf[34] = 0x92;
-	buf[35] = 0x0d;
-	buf[36] = 0x00;  // use internal trigger, do not invert trigger
-	bytes_written = minila_write(devc, buf, 37);
-	if (bytes_written != 37) {
-		sr_err("Acquisition failed to start: %d.", bytes_written);
-		return SR_ERR;
-	}
-
-	/* Read status register 1 & 2 */
-	buf[0] = 0x91;  // CPUMode Read Extended Address
-	buf[1] = 0x01;  // addr_high = 1 to switch from writing to reading
-	buf[2] = 0x01;  // addr_low = status register 1
-	buf[3] = 0x90;  // CPUMode Read Short Address
-	buf[4] = 0x03;  // addr_low = status register 2
-	buf[5] = 0x87;  // immediate read return value
-	bytes_written = minila_write(devc, buf, 6);
-	if (bytes_written != 6) {
-		sr_err("Acquisition failed to start: %d.", bytes_written);
-		return SR_ERR;
-	}
-
-	// Timeout = 1s
-	done = 1 + time(NULL);
-	do {
-		bytes_read = minila_read(devc, buf, 2);
-		now = time(NULL);
-	} while ((done > now) && (bytes_read == 0));
-
-	sr_dbg("MINILA Status register 1: 0x%02x", buf[0]);
-	sr_dbg("MINILA Status register 2: 0x%02x", buf[1]);
-
-
-	/* Run command */
-	buf[0] = 0x93;
-	buf[1] = 0x00;
-	buf[2] = 0x00;
-	buf[3] = 0x80;
-	bytes_written = minila_write(devc, buf, 4);
-	if (bytes_written != 4) {
-		sr_err("Acquisition failed to start: %d.", bytes_written);
-		return SR_ERR;
-	}
-
+	(void)minila_setup_and_run(devc);
 
 	sr_dbg("Acquisition started successfully.");
 

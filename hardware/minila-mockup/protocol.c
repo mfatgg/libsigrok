@@ -111,12 +111,12 @@ SR_PRIV int minila_is_valid_samplerate(uint64_t samplerate)
 
 	for (i = 0; i < 32; i++) {
 		if (minila_supported_samplerates[i] == samplerate)
-			return i;
+			return 1;
 	}
 
 	sr_err("Invalid samplerate (%" PRIu64 "Hz).", samplerate);
 
-	return -1;
+	return 0;
 }
 
 /**
@@ -131,14 +131,20 @@ SR_PRIV int minila_is_valid_samplerate(uint64_t samplerate)
  */
 SR_PRIV uint8_t minila_samplerate_to_index(uint64_t samplerate)
 {
-	int index;
+	int index = -1;
+	int i;
 
 	if (samplerate == 0) {
 		sr_err("%s: samplerate was 0.", __func__);
 		return 0xff;
 	}
 
-	index = minila_is_valid_samplerate(samplerate);
+	for (i = 0; i < 32; i++) {
+		if (minila_supported_samplerates[i] == samplerate) {
+			index = i;
+			break;
+		}
+	}
 	if (index == -1) {
 		sr_err("%s: Can't get divcount, samplerate invalid.", __func__);
 		return 0xff;
@@ -146,6 +152,108 @@ SR_PRIV uint8_t minila_samplerate_to_index(uint64_t samplerate)
 
 	return (uint8_t)index;
 }
+
+
+SR_PRIV int minila_setup_and_run(struct dev_context *devc)
+{
+	uint8_t buf[128];
+	int bytes_written, bytes_read;
+	time_t done, now;
+
+	/* Reset command */
+	buf[0] = 0x93;
+	buf[1] = 0x00;
+	buf[2] = 0x00;
+	buf[3] = 0x40;
+	/* Trigger events counter command */
+	buf[4] = 0x92;
+	buf[5] = 0x01;
+	buf[6] = 0x00;  // 1 trigger hit
+	/* Trigger length counter command */
+	buf[7] = 0x92;
+	buf[8] = 0x02;
+	buf[9] = 0x01;  // min. trigger length = 1 clk
+	/* Timebase command (Timeanalysis firmware only) */
+	buf[10] = 0x92;
+	buf[11] = 0x03;
+	buf[12] = devc->samplerate_index;  // samplerate select
+	sr_dbg("MINILA Samplerate select: %d", devc->samplerate_index);
+	/* Trigger pre/post command */
+	buf[13] = 0x92;
+	buf[14] = 0x04;
+	buf[15] = 0x1f;  // no pretrigger, 512k posttrigger
+	/* Trigger value x7:x0 command */
+	buf[16] = 0x92;
+	buf[17] = 0x05;
+	buf[18] = 0x00;  // compare inputs with 0x00
+	/* Trigger value x15:x8 command */
+	buf[19] = 0x92;
+	buf[20] = 0x06;
+	buf[21] = 0x00;  // compare inputs with 0x00
+	/* Trigger edge e15:e8 command */
+	buf[22] = 0x92;
+	buf[23] = 0x07;
+	buf[24] = 0x00;  // compare inputs with using value (not edge)
+	/* Trigger edge e7:e0 command */
+	buf[25] = 0x92;
+	buf[26] = 0x08;
+	buf[27] = 0x00;  // compare inputs with using value (not edge)
+	/* Trigger mask m15:m8 command */
+	buf[28] = 0x92;
+	buf[29] = 0x09;
+	buf[30] = 0x00;  // ignore all input bits
+	/* Trigger mask m7:m0 command */
+	buf[31] = 0x92;
+	buf[32] = 0x0a;
+	buf[33] = 0x00;  // ignore all input bits
+	/* Trigger control command */
+	buf[34] = 0x92;
+	buf[35] = 0x0d;
+	buf[36] = 0x00;  // use internal trigger, do not invert trigger
+	bytes_written = minila_write(devc, buf, 37);
+	if (bytes_written != 37) {
+		sr_err("Acquisition failed to start: %d.", bytes_written);
+		return SR_ERR;
+	}
+
+	/* Read status register 1 & 2 */
+	buf[0] = 0x91;  // CPUMode Read Extended Address
+	buf[1] = 0x01;  // addr_high = 1 to switch from writing to reading
+	buf[2] = 0x01;  // addr_low = status register 1
+	buf[3] = 0x90;  // CPUMode Read Short Address
+	buf[4] = 0x03;  // addr_low = status register 2
+	buf[5] = 0x87;  // immediate read return value
+	bytes_written = minila_write(devc, buf, 6);
+	if (bytes_written != 6) {
+		sr_err("Acquisition failed to start: %d.", bytes_written);
+		return SR_ERR;
+	}
+
+	// Timeout = 1s
+	done = 1 + time(NULL);
+	do {
+		bytes_read = minila_read(devc, buf, 2);
+		now = time(NULL);
+	} while ((done > now) && (bytes_read == 0));
+
+	sr_dbg("MINILA Status register 1: 0x%02x", buf[0]);
+	sr_dbg("MINILA Status register 2: 0x%02x", buf[1]);
+
+
+	/* Run command */
+	buf[0] = 0x93;
+	buf[1] = 0x00;
+	buf[2] = 0x00;
+	buf[3] = 0x80;
+	bytes_written = minila_write(devc, buf, 4);
+	if (bytes_written != 4) {
+		sr_err("Acquisition failed to start: %d.", bytes_written);
+		return SR_ERR;
+	}
+
+	return SR_OK;
+}
+
 
 /**
  * Write data of a certain length to the MINILA's FTDI device.
@@ -473,8 +581,7 @@ SR_PRIV int minila_set_samplerate(const struct sr_dev_inst *sdi, uint64_t sample
  */
 SR_PRIV int minila_read_block(struct dev_context *devc)
 {
-	int i, j, byte_offset, m, mi, p, index, bytes_read, bytes_written;
-	int bytes_remaining, bytes_read_total, ret;
+	int i, byte_offset, m, mi, p, index, bytes_read, bytes_written;
 	time_t now;
 	static uint8_t buf[1 + 2*BS + 1];
 
@@ -533,26 +640,20 @@ SR_PRIV int minila_read_block(struct dev_context *devc)
 
 	}
 
-	// read chunks of 256 bytes
-	bytes_read_total = 0;
-
 	bytes_written = minila_write_async(devc, buf, 1 + 2*BS + 1);
 	//sr_dbg("bytes written: %d", bytes_written);
 
-	bytes_remaining = BS;
 	do {
-		bytes_read = minila_read(devc, &devc->block_buf[j], bytes_remaining);
-		bytes_remaining -= bytes_read;
-		bytes_read_total += bytes_read;
+		bytes_read = minila_read(devc, devc->block_buf, BS);
 		now = time(NULL);
-	} while ((devc->done > now) && (bytes_remaining > 0));
+	} while ((devc->done > now) && (bytes_read == 0));
 	//sr_dbg("bytes read: %d", bytes_read_total);
 
 	minila_async_complete(devc, 0);
 
 	/* Check if block read was successful or a timeout occured. */
-	if (bytes_read_total != BS) {
-		sr_err("Trigger timed out. Bytes read: %d.", bytes_read_total);
+	if (bytes_read != BS) {
+		sr_err("Trigger timed out. Bytes read: %d.", bytes_read);
 		(void) minila_reset(devc); /* Ignore errors. */
 		return SR_ERR;
 	}

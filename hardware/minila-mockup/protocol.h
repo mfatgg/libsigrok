@@ -122,6 +122,7 @@ extern const struct sr_samplerates minila_samplerates;
 SR_PRIV void minila_fill_supported_samplerates_if_needed(void);
 SR_PRIV int minila_is_valid_samplerate(uint64_t samplerate);
 SR_PRIV uint8_t minila_samplerate_to_index(uint64_t samplerate);
+SR_PRIV int minila_setup_and_run(struct dev_context *devc);
 SR_PRIV int minila_write(struct dev_context *devc, uint8_t *buf, int size);
 SR_PRIV int minila_write_async(struct dev_context *devc, uint8_t *buf, int size);
 SR_PRIV int minila_write_async_complete(struct dev_context *devc, int wait_for_more);
