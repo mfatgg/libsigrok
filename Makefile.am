@@ -398,6 +398,12 @@ src_libdrivers_la_SOURCES += \
 	src/hardware/mic-985xx/protocol.c \
 	src/hardware/mic-985xx/api.c
 endif
+if HW_MINILA_MOCKUP
+src_libdrivers_la_SOURCES += \
+	src/hardware/minila-mockup/protocol.h \
+	src/hardware/minila-mockup/protocol.c \
+	src/hardware/minila-mockup/api.c
+endif
 if HW_MOTECH_LPS_30X
 src_libdrivers_la_SOURCES += \
 	src/hardware/motech-lps-30x/protocol.h \

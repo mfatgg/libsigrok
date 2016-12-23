@@ -17,529 +17,549 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <ftdi.h>
-#include <glib.h>
-#include <string.h>
-#include "libsigrok.h"
-#include "libsigrok-internal.h"
+#include <config.h>
 #include "protocol.h"
 
-SR_PRIV struct sr_dev_driver minila_mockup_driver_info;
-static struct sr_dev_driver *di = &minila_mockup_driver_info;
-
-/*
- */
-static const uint16_t usb_pids[] = {
-	0x6010,
+static const uint32_t drvopts[] = {
+    SR_CONF_LOGIC_ANALYZER,
 };
 
-/* Function prototypes. */
-static int hw_dev_acquisition_stop(struct sr_dev_inst *sdi, void *cb_data);
+static const uint32_t scanopts[] = {
+    SR_CONF_CONN,
+};
 
-static int clear_instances(void)
+static const uint32_t devopts[] = {
+    SR_CONF_LIMIT_MSEC | SR_CONF_SET,
+    SR_CONF_LIMIT_SAMPLES | SR_CONF_SET | SR_CONF_LIST,
+    SR_CONF_CONN | SR_CONF_GET,
+    SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+    SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
+};
+
+static const int32_t trigger_matches[] = {
+    SR_TRIGGER_ZERO,
+    SR_TRIGGER_ONE,
+};
+
+static int dev_acquisition_stop(struct sr_dev_inst *sdi);
+
+static void clear_helper(void *priv)
 {
-	GSList *l;
-	struct sr_dev_inst *sdi;
-	struct drv_context *drvc;
-	struct dev_context *devc;
+    struct dev_context *devc;
 
-	drvc = di->priv;
+    devc = priv;
 
-	/* Properly close all devices. */
-	for (l = drvc->instances; l; l = l->next) {
-		if (!(sdi = l->data)) {
-			/* Log error, but continue cleaning up the rest. */
-			sr_err("%s: sdi was NULL, continuing.", __func__);
-			continue;
-		}
-		if (sdi->priv) {
-			devc = sdi->priv;
-			ftdi_free(devc->ftdic);
-		}
-		sr_dev_inst_free(sdi);
-	}
-	g_slist_free(drvc->instances);
-	drvc->instances = NULL;
-
-	return SR_OK;
+    ftdi_free(devc->ftdic);
+    g_free(devc->final_buf);
 }
 
-static int hw_init(void)
+static int dev_clear(const struct sr_dev_driver *di)
 {
-	struct drv_context *drvc;
-
-	if (!(drvc = g_try_malloc0(sizeof(struct drv_context)))) {
-		sr_err("Driver context malloc failed.");
-		return SR_ERR_MALLOC;
-	}
-
-	di->priv = drvc;
-
-	return SR_OK;
+    return std_dev_clear(di, clear_helper);
 }
 
-static GSList *hw_scan(GSList *options)
+static int add_device(int model, struct libusb_device_descriptor *des,
+    const char *serial_num, const char *connection_id, libusb_device *usbdev,
+    GSList **devices)
 {
-	struct sr_dev_inst *sdi;
-	struct sr_probe *probe;
-	struct drv_context *drvc;
-	struct dev_context *devc;
-	GSList *devices;
-	unsigned int i;
-	int ret;
+    int ret;
+    unsigned int i;
+    struct sr_dev_inst *sdi;
+    struct dev_context *devc;
 
-	(void)options;
+    ret = SR_OK;
 
-	drvc = di->priv;
-	devices = NULL;
+    /* Allocate memory for our private device context. */
+    devc = g_malloc0(sizeof(struct dev_context));
 
-	/* Allocate memory for our private device context. */
-	if (!(devc = g_try_malloc(sizeof(struct dev_context)))) {
-		sr_err("Device context malloc failed.");
-		goto err_free_nothing;
-	}
+    /* Set some sane defaults. */
+    devc->prof = &minila_profiles[model];
+    devc->ftdic = NULL; /* Will be set in the open() API call. */
+    devc->cur_samplerate = SR_MHZ(100); /* 100MHz == max. samplerate */
+    devc->limit_msec = 0;
+    devc->limit_samples = MAX_NUM_SAMPLES;
+    devc->limit_blocks = NUM_BLOCKS;
+    devc->final_buf = NULL;
+    devc->trigger_pattern = 0x00; /* Value irrelevant, see trigger_mask. */
+    devc->trigger_mask = 0x00; /* All probes are "don't care". */
+    devc->trigger_found = 0;
+    devc->done = 0;
+    devc->block_counter = 0;
+    devc->samplerate_index = 0; /* 10ns sample period == 100MHz samplerate */
+    devc->usb_vid = des->idVendor;
+    devc->usb_pid = des->idProduct;
 
-	/* Set some sane defaults. */
-	devc->ftdic = NULL;
-	devc->cur_samplerate = SR_MHZ(100); /* 100MHz == max. samplerate */
-	devc->limit_msec = 0;
-	devc->limit_samples = MAX_NUM_SAMPLES;
-	devc->limit_blocks = NUM_BLOCKS;
-	devc->session_dev_id = NULL;
-	devc->final_buf = NULL;
-	devc->trigger_pattern = 0x00; /* Value irrelevant, see trigger_mask. */
-	devc->trigger_mask = 0x00; /* All probes are "don't care". */
-	devc->trigger_timeout = 10; /* Default to 10s trigger timeout. */
-	devc->trigger_found = 0;
-	devc->done = 0;
-	devc->block_counter = 0;
-	devc->samplerate_index = 0; /* 10ns sample period == 100MHz samplerate */
-	devc->usb_pid = 0;
+    memset(devc->samplerates, 0, sizeof(uint64_t) * 32);
 
-	/* Allocate memory for the FTDI context (ftdic) and initialize it. */
-	if (!(devc->ftdic = ftdi_new())) {
-		sr_err("%s: ftdi_new failed.", __func__);
-		goto err_free_devc;
-	}
+    /* Allocate memory where we'll store the de-mangled data. */
+    if (!(devc->final_buf = g_try_malloc(SDRAM_SIZE))) {
+        sr_err("Failed to allocate memory for sample buffer.");
+        ret = SR_ERR_MALLOC;
+        goto err_free_devc;
+    }
 
-	/* Check for the device and temporarily open it. */
-	for (i = 0; i < ARRAY_SIZE(usb_pids); i++) {
-		sr_dbg("Probing for VID/PID %04x:%04x.", USB_VENDOR_ID,
-		       usb_pids[i]);
-		ret = ftdi_usb_open_desc(devc->ftdic, USB_VENDOR_ID,
-					 usb_pids[i], USB_DESCRIPTION, NULL);
-		if (ret == 0) {
-			sr_dbg("Found MINILA device (%04x:%04x).",
-			       USB_VENDOR_ID, usb_pids[i]);
-			devc->usb_pid = usb_pids[i];
-		}
-	}
+    /* We now know the device, set its max. samplerate as default. */
+    devc->cur_samplerate = devc->prof->max_samplerate;
 
-	if (devc->usb_pid == 0)
-		goto err_free_ftdic;
+    /* Register the device with libsigrok. */
+    sdi = g_malloc0(sizeof(struct sr_dev_inst));
+    sdi->status = SR_ST_INACTIVE;
+    sdi->vendor = g_strdup("ChronoVu");
+    sdi->model = g_strdup(devc->prof->modelname);
+    sdi->serial_num = g_strdup(serial_num);
+    sdi->connection_id = g_strdup(connection_id);
+    sdi->conn = sr_usb_dev_inst_new(libusb_get_bus_number(usbdev),
+        libusb_get_device_address(usbdev), NULL);
+    sdi->priv = devc;
 
-	/* Register the device with libsigrok. */
-	sdi = sr_dev_inst_new(0, SR_ST_INITIALIZING,
-			USB_VENDOR_NAME, USB_MODEL_NAME, USB_MODEL_VERSION);
-	if (!sdi) {
-		sr_err("%s: sr_dev_inst_new failed.", __func__);
-		goto err_close_ftdic;
-	}
-	sdi->driver = di;
-	sdi->priv = devc;
+    for (i = 0; i < devc->prof->num_channels; i++)
+        sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, TRUE,
+                minila_channel_names[i]);
 
-	for (i = 0; minila_probe_names[i]; i++) {
-		if (!(probe = sr_probe_new(i, SR_PROBE_LOGIC, TRUE,
-					minila_probe_names[i])))
-			return NULL;
-		sdi->probes = g_slist_append(sdi->probes, probe);
-	}
+    *devices = g_slist_append(*devices, sdi);
 
-	devices = g_slist_append(devices, sdi);
-	drvc->instances = g_slist_append(drvc->instances, sdi);
+    if (ret == SR_OK)
+        return SR_OK;
 
-	sr_spew("Device init successful.");
-
-	/* Close device. We'll reopen it again when we need it. */
-	(void) minila_close(devc); /* Log, but ignore errors. */
-
-	return devices;
-
-err_close_ftdic:
-	(void) minila_close(devc); /* Log, but ignore errors. */
-err_free_ftdic:
-	free(devc->ftdic); /* NOT g_free()! */
 err_free_devc:
-	g_free(devc);
-err_free_nothing:
+    g_free(devc);
 
-	return NULL;
+    return ret;
 }
 
-static GSList *hw_dev_list(void)
+static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
-	struct drv_context *drvc;
+    int i, ret, model;
+    struct drv_context *drvc;
+    GSList *devices, *conn_devices, *l;
+    struct sr_usb_dev_inst *usb;
+    struct sr_config *src;
+    struct libusb_device_descriptor des;
+    libusb_device **devlist;
+    struct libusb_device_handle *hdl;
+    const char *conn;
+    char product[64], serial_num[64], connection_id[64];
 
-	drvc = di->priv;
+    drvc = di->context;
 
-	return drvc->instances;
+    conn = NULL;
+    for (l = options; l; l = l->next) {
+        src = l->data;
+        switch (src->key) {
+        case SR_CONF_CONN:
+            conn = g_variant_get_string(src->data, NULL);
+            break;
+        }
+    }
+    if (conn)
+        conn_devices = sr_usb_find(drvc->sr_ctx->libusb_ctx, conn);
+    else
+        conn_devices = NULL;
+
+    devices = NULL;
+    libusb_get_device_list(drvc->sr_ctx->libusb_ctx, &devlist);
+
+    for (i = 0; devlist[i]; i++) {
+        if (conn) {
+            for (l = conn_devices; l; l = l->next) {
+                usb = l->data;
+                if (usb->bus == libusb_get_bus_number(devlist[i])
+                    && usb->address == libusb_get_device_address(devlist[i]))
+                    break;
+            }
+            if (!l)
+                /* This device matched none of the ones that
+                 * matched the conn specification. */
+                continue;
+        }
+
+        libusb_get_device_descriptor(devlist[i], &des);
+
+        if ((ret = libusb_open(devlist[i], &hdl)) < 0)
+            continue;
+
+        if (des.iProduct == 0) {
+            product[0] = '\0';
+        } else if ((ret = libusb_get_string_descriptor_ascii(hdl,
+                des.iProduct, (unsigned char *)product,
+                sizeof(product))) < 0) {
+            sr_warn("Failed to get product string descriptor: %s.",
+                libusb_error_name(ret));
+            continue;
+        }
+
+        if (des.iSerialNumber == 0) {
+            serial_num[0] = '\0';
+        } else if ((ret = libusb_get_string_descriptor_ascii(hdl,
+                des.iSerialNumber, (unsigned char *)serial_num,
+                sizeof(serial_num))) < 0) {
+            sr_warn("Failed to get serial number string descriptor: %s.",
+                libusb_error_name(ret));
+            continue;
+        }
+
+        usb_get_port_path(devlist[i], connection_id, sizeof(connection_id));
+
+        libusb_close(hdl);
+
+        // TODO: verify product id for MiniLA Mockup version!
+        if (!strcmp(product, USB_DESCRIPTION)) {
+            model = 0;
+        } else {
+            sr_spew("Unknown iProduct string '%s'.", product);
+            continue;
+        }
+
+        sr_dbg("Found %s (%04x:%04x, %d.%d, %s).",
+               product, des.idVendor, des.idProduct,
+               libusb_get_bus_number(devlist[i]),
+               libusb_get_device_address(devlist[i]), connection_id);
+
+        if ((ret = add_device(model, &des, serial_num, connection_id,
+                    devlist[i], &devices)) < 0) {
+            sr_dbg("Failed to add device: %d.", ret);
+        }
+    }
+
+    libusb_free_device_list(devlist, 1);
+    g_slist_free_full(conn_devices, (GDestroyNotify)sr_usb_dev_inst_free);
+
+    return std_scan_complete(di, devices);
 }
 
-static int hw_dev_open(struct sr_dev_inst *sdi)
+static int dev_open(struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
-	int ret;
+    struct dev_context *devc;
+    int ret;
 
-	if (!(devc = sdi->priv)) {
-		sr_err("%s: sdi->priv was NULL.", __func__);
-		return SR_ERR_BUG;
-	}
+    devc = sdi->priv;
 
-	sr_dbg("Opening MINILA device (%04x:%04x).", USB_VENDOR_ID,
-	       devc->usb_pid);
+    /* Allocate memory for the FTDI context and initialize it. */
+    if (!(devc->ftdic = ftdi_new())) {
+        sr_err("Failed to initialize libftdi.");
+        return SR_ERR;
+    }
 
-	/* Open the device. */
-	if ((ret = ftdi_usb_open_desc(devc->ftdic, USB_VENDOR_ID,
-			devc->usb_pid, USB_DESCRIPTION, NULL)) < 0) {
-		sr_err("%s: ftdi_usb_open_desc: (%d) %s",
-		       __func__, ret, ftdi_get_error_string(devc->ftdic));
-		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
-		return SR_ERR;
-	}
-	sr_dbg("Device opened successfully.");
+    sr_dbg("Opening %s device (%04x:%04x).", devc->prof->modelname,
+           devc->usb_vid, devc->usb_pid);
 
-	/* Purge RX/TX buffers in the FTDI chip. */
-	if ((ret = ftdi_usb_purge_buffers(devc->ftdic)) < 0) {
-		sr_err("%s: ftdi_usb_purge_buffers: (%d) %s",
-		       __func__, ret, ftdi_get_error_string(devc->ftdic));
-		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
-		goto err_dev_open_close_ftdic;
-	}
-	sr_dbg("FTDI buffers purged successfully.");
+    /* Open the device. */
+    if ((ret = ftdi_usb_open_desc(devc->ftdic, devc->usb_vid,
+            devc->usb_pid, devc->prof->iproduct, NULL)) < 0) {
+        sr_err("Failed to open FTDI device (%d): %s.",
+               ret, ftdi_get_error_string(devc->ftdic));
+        goto err_ftdi_free;
+    }
+    sr_dbg("Device opened successfully.");
 
-	/* Enable flow control in the FTDI chip. */
-	if ((ret = ftdi_setflowctrl(devc->ftdic, SIO_RTS_CTS_HS)) < 0) {
-		sr_err("%s: ftdi_setflowcontrol: (%d) %s",
-		       __func__, ret, ftdi_get_error_string(devc->ftdic));
-		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
-		goto err_dev_open_close_ftdic;
-	}
-	sr_dbg("FTDI flow control enabled successfully.");
+    /* Purge RX/TX buffers in the FTDI chip. */
+    if ((ret = ftdi_usb_purge_buffers(devc->ftdic)) < 0) {
+        sr_err("Failed to purge FTDI buffers (%d): %s.",
+               ret, ftdi_get_error_string(devc->ftdic));
+        goto err_ftdi_free;
+    }
+    sr_dbg("FTDI buffers purged successfully.");
 
-	if ((ret = ftdi_set_latency_timer(devc->ftdic, 16)) < 0) {
-		sr_err("%s: ftdi_set_latency_timer: (%d) %s",
-		       __func__, ret, ftdi_get_error_string(devc->ftdic));
-		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
-		goto err_dev_open_close_ftdic;
-	}
-	sr_dbg("FTDI latency set to 16 successfully.");
+    /* Enable flow control in the FTDI chip. */
+    if ((ret = ftdi_setflowctrl(devc->ftdic, SIO_RTS_CTS_HS)) < 0) {
+        sr_err("Failed to enable FTDI flow control (%d): %s.",
+               ret, ftdi_get_error_string(devc->ftdic));
+        goto err_ftdi_free;
+    }
+    sr_dbg("FTDI flow control enabled successfully.");
 
-	if ((ret = ftdi_set_bitmode(devc->ftdic, 0, BITMODE_MCU)) < 0) {
-		sr_err("%s: ftdi_set_bitmode: (%d) %s",
-		       __func__, ret, ftdi_get_error_string(devc->ftdic));
-		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
-		goto err_dev_open_close_ftdic;
-	}
-	sr_dbg("FTDI bitmode set to MCU Host Bus Emulation mode successfully.");
+    if ((ret = ftdi_set_latency_timer(devc->ftdic, 16)) < 0) {
+        sr_err("Failed to set FTDI latency (%d): %s",
+               ret, ftdi_get_error_string(devc->ftdic));
+        goto err_ftdi_free;
+    }
+    sr_dbg("FTDI latency set to 16 successfully.");
+
+    if ((ret = ftdi_set_bitmode(devc->ftdic, 0, BITMODE_MCU)) < 0) {
+        sr_err("Failed to set FTDI bitmode (%d): %s",
+               ret, ftdi_get_error_string(devc->ftdic));
+        goto err_ftdi_free;
+    }
+    sr_dbg("FTDI bitmode set to MCU Host Bus Emulation mode successfully.");
 
 
-	/* Wait 100ms. */
-	g_usleep(100 * 1000);
+    /* Wait 100ms. */
+    g_usleep(100 * 1000);
 
-	sdi->status = SR_ST_ACTIVE;
+    sdi->status = SR_ST_ACTIVE;
 
-	return SR_OK;
+    if (ret == SR_OK)
+        return SR_OK;
 
-err_dev_open_close_ftdic:
-	(void) minila_close(devc); /* Log, but ignore errors. */
-	return SR_ERR;
+err_ftdi_free:
+    ftdi_free(devc->ftdic); /* Close device (if open), free FTDI context. */
+    devc->ftdic = NULL;
+    return ret;
 }
 
-static int hw_dev_close(struct sr_dev_inst *sdi)
+static int dev_close(struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
+    int ret;
+    struct dev_context *devc;
 
-	if (!(devc = sdi->priv)) {
-		sr_err("%s: sdi->priv was NULL.", __func__);
-		return SR_ERR_BUG;
-	}
+    if (sdi->status != SR_ST_ACTIVE)
+        return SR_OK;
 
-	sr_dbg("Closing device.");
+    devc = sdi->priv;
 
-	if (sdi->status == SR_ST_ACTIVE) {
-		sr_dbg("Status ACTIVE, closing device.");
-		(void) minila_close_usb_reset_sequencer(devc); /* Ignore errors. */
-	} else {
-		sr_spew("Status not ACTIVE, nothing to do.");
-	}
+    if (devc->ftdic && (ret = ftdi_usb_close(devc->ftdic)) < 0)
+        sr_err("Failed to close FTDI device (%d): %s.",
+               ret, ftdi_get_error_string(devc->ftdic));
 
-	sdi->status = SR_ST_INACTIVE;
+    sdi->status = SR_ST_INACTIVE;
 
-	return SR_OK;
+    return SR_OK;
 }
 
-static int hw_cleanup(void)
+static int config_get(uint32_t key, GVariant **data, const struct sr_dev_inst *sdi,
+        const struct sr_channel_group *cg)
 {
-	if (!di->priv)
-		/* Can get called on an unused driver, doesn't matter. */
-		return SR_OK;
+    struct dev_context *devc;
+    struct sr_usb_dev_inst *usb;
+    char str[128];
 
-	clear_instances();
+    (void)cg;
 
-	return SR_OK;
+    switch (key) {
+    case SR_CONF_CONN:
+        if (!sdi || !(usb = sdi->conn))
+            return SR_ERR_ARG;
+        snprintf(str, 128, "%d.%d", usb->bus, usb->address);
+        *data = g_variant_new_string(str);
+        break;
+    case SR_CONF_SAMPLERATE:
+        if (!sdi)
+            return SR_ERR_BUG;
+        devc = sdi->priv;
+        *data = g_variant_new_uint64(devc->cur_samplerate);
+        break;
+    default:
+        return SR_ERR_NA;
+    }
+
+    return SR_OK;
 }
 
-static int hw_info_get(int info_id, const void **data,
-		       const struct sr_dev_inst *sdi)
+static int config_set(uint32_t key, GVariant *data, const struct sr_dev_inst *sdi,
+        const struct sr_channel_group *cg)
 {
-	struct dev_context *devc;
+    struct dev_context *devc;
 
-	switch (info_id) {
-	case SR_DI_HWCAPS:
-		*data = minila_hwcaps;
-		break;
-	case SR_DI_NUM_PROBES:
-		*data = GINT_TO_POINTER(NUM_PROBES);
-		sr_spew("%s: Returning number of probes: %d.", __func__,
-			NUM_PROBES);
-		break;
-	case SR_DI_PROBE_NAMES:
-		*data = minila_probe_names;
-		sr_spew("%s: Returning probenames.", __func__);
-		break;
-	case SR_DI_SAMPLERATES:
-		minila_fill_supported_samplerates_if_needed();
-		*data = &minila_samplerates;
-		sr_spew("%s: Returning samplerates.", __func__);
-		break;
-	case SR_DI_TRIGGER_TYPES:
-		*data = (char *)TRIGGER_TYPES;
-		sr_spew("%s: Returning trigger types: %s.", __func__,
-			TRIGGER_TYPES);
-		break;
-	case SR_DI_CUR_SAMPLERATE:
-		if (sdi) {
-			devc = sdi->priv;
-			*data = &devc->cur_samplerate;
-			sr_spew("%s: Returning samplerate: %" PRIu64 "Hz.",
-				__func__, devc->cur_samplerate);
-		} else
-			return SR_ERR;
-		break;
-	default:
-		return SR_ERR_ARG;
-	}
+    (void)cg;
 
-	return SR_OK;
+    if (sdi->status != SR_ST_ACTIVE)
+        return SR_ERR_DEV_CLOSED;
+
+    devc = sdi->priv;
+
+    switch (key) {
+    case SR_CONF_SAMPLERATE:
+        if (minila_set_samplerate(sdi, g_variant_get_uint64(data)) < 0)
+            return SR_ERR;
+        break;
+    case SR_CONF_LIMIT_MSEC:
+        if (g_variant_get_uint64(data) == 0)
+            return SR_ERR_ARG;
+        devc->limit_msec = g_variant_get_uint64(data);
+        break;
+    case SR_CONF_LIMIT_SAMPLES:
+        if (g_variant_get_uint64(data) == 0)
+            return SR_ERR_ARG;
+        devc->limit_samples = g_variant_get_uint64(data);
+        break;
+    default:
+        return SR_ERR_NA;
+    }
+
+    return SR_OK;
 }
 
-static int hw_dev_config_set(const struct sr_dev_inst *sdi, int hwcap,
-		const void *value)
+static int config_list(uint32_t key, GVariant **data, const struct sr_dev_inst *sdi,
+        const struct sr_channel_group *cg)
 {
-	struct dev_context *devc;
+    GVariant *gvar, *grange[2];
+    GVariantBuilder gvb;
+    struct dev_context *devc;
 
-	if (!(devc = sdi->priv)) {
-		sr_err("%s: sdi->priv was NULL.", __func__);
-		return SR_ERR_BUG;
-	}
+    (void)cg;
 
-	switch (hwcap) {
-	case SR_HWCAP_SAMPLERATE:
-		if (minila_set_samplerate(sdi, *(const uint64_t *)value) == SR_ERR) {
-			sr_err("%s: setting samplerate failed.", __func__);
-			return SR_ERR;
-		}
-		sr_dbg("SAMPLERATE = %" PRIu64, devc->cur_samplerate);
-		break;
-	case SR_HWCAP_LIMIT_MSEC:
-		if (*(const uint64_t *)value == 0) {
-			sr_err("%s: LIMIT_MSEC can't be 0.", __func__);
-			return SR_ERR;
-		}
-		devc->limit_msec = *(const uint64_t *)value;
-		sr_dbg("LIMIT_MSEC = %" PRIu64, devc->limit_msec);
-		break;
-	case SR_HWCAP_LIMIT_SAMPLES:
-		if (*(const uint64_t *)value < MIN_NUM_SAMPLES) {
-			sr_err("%s: LIMIT_SAMPLES too small.", __func__);
-			return SR_ERR;
-		}
-		if (*(const uint64_t *)value > MAX_NUM_SAMPLES) {
-			sr_err("%s: LIMIT_SAMPLES exceeds hw max", __func__);
-			return SR_ERR;
-		}
-		devc->limit_samples = *(const uint64_t *)value;
-		sr_dbg("LIMIT_SAMPLES = %" PRIu64, devc->limit_samples);
-		devc->limit_blocks = (((devc->limit_samples * BYTES_PER_SAMPLE)-1) / BS) + 1;
-		sr_dbg("LIMIT_BLOCKS = %" PRIu64, devc->limit_blocks);
-		break;
-	default:
-		/* Unknown capability, return SR_ERR. */
-		sr_err("%s: Unknown capability: %d.", __func__, hwcap);
-		return SR_ERR;
-		break;
-	}
+    switch (key) {
+    case SR_CONF_SCAN_OPTIONS:
+        *data = g_variant_new_fixed_array(G_VARIANT_TYPE_UINT32,
+                scanopts, ARRAY_SIZE(scanopts), sizeof(uint32_t));
+        break;
+    case SR_CONF_DEVICE_OPTIONS:
+        if (!sdi)
+            *data = g_variant_new_fixed_array(G_VARIANT_TYPE_UINT32,
+                    drvopts, ARRAY_SIZE(drvopts), sizeof(uint32_t));
+        else
+            *data = g_variant_new_fixed_array(G_VARIANT_TYPE_UINT32,
+                    devopts, ARRAY_SIZE(devopts), sizeof(uint32_t));
+        break;
+    case SR_CONF_SAMPLERATE:
+        if (!sdi)
+            return SR_ERR_BUG;
+        devc = sdi->priv;
+        minila_fill_samplerates_if_needed(sdi);
+        g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
+        gvar = g_variant_new_fixed_array(G_VARIANT_TYPE("t"),
+                devc->samplerates,
+                ARRAY_SIZE(devc->samplerates),
+                sizeof(uint64_t));
+        g_variant_builder_add(&gvb, "{sv}", "samplerates", gvar);
+        *data = g_variant_builder_end(&gvb);
+        break;
+    case SR_CONF_LIMIT_SAMPLES:
+        if (!sdi || !sdi->priv || !(devc = sdi->priv) || !devc->prof)
+            return SR_ERR_BUG;
+        grange[0] = g_variant_new_uint64(0);
+        grange[1] = g_variant_new_uint64(MAX_NUM_SAMPLES);
+        *data = g_variant_new_tuple(grange, 2);
+        break;
+    case SR_CONF_TRIGGER_MATCH:
+        if (!sdi || !sdi->priv || !(devc = sdi->priv) || !devc->prof)
+            return SR_ERR_BUG;
+        *data = g_variant_new_fixed_array(G_VARIANT_TYPE_INT32,
+                trigger_matches, devc->prof->num_trigger_matches,
+                sizeof(int32_t));
+        break;
+    default:
+        return SR_ERR_NA;
+    }
 
-	return SR_OK;
+    return SR_OK;
 }
 
 static int receive_data(int fd, int revents, void *cb_data)
 {
-	int i, ret;
-	struct sr_dev_inst *sdi;
-	struct dev_context *devc;
+    int i, ret;
+    struct sr_dev_inst *sdi;
+    struct dev_context *devc;
 
-	(void)fd;
-	(void)revents;
+    (void)fd;
+    (void)revents;
 
-	if (!(sdi = cb_data)) {
-		sr_err("%s: cb_data was NULL.", __func__);
-		return FALSE;
-	}
+    if (!(sdi = cb_data)) {
+        sr_err("cb_data was NULL.");
+        return FALSE;
+    }
 
-	if (!(devc = sdi->priv)) {
-		sr_err("%s: sdi->priv was NULL.", __func__);
-		return FALSE;
-	}
+    if (!(devc = sdi->priv)) {
+        sr_err("sdi->priv was NULL.");
+        return FALSE;
+    }
 
-	if (!devc->ftdic) {
-		sr_err("%s: devc->ftdic was NULL.", __func__);
-		return FALSE;
-	}
+    if (!devc->ftdic) {
+        sr_err("devc->ftdic was NULL.");
+        return FALSE;
+    }
 
-	if (devc->block_counter == 0) {
-		sr_dbg("Malloc final_buf, bytes: %d", devc->limit_blocks * BS);
-		/* Allocate memory where we'll store the de-mangled data. */
-		if (!(devc->final_buf = g_try_malloc(devc->limit_blocks * BS))) {
-			sr_err("final_buf malloc failed.");
-			hw_dev_acquisition_stop(sdi, sdi);
-			return FALSE;
-		}
-		/* init sample memory with default value */
-		memset(devc->final_buf, 0, devc->limit_blocks * BS);
-	}
+    /* Get one block of data. */
+    if ((ret = minila_read_block(devc)) < 0) {
+        sr_err("Failed to read data block: %d.", ret);
+        dev_acquisition_stop(sdi);
+        return FALSE;
+    }
 
-	/* Get one block of data. */
-	if ((ret = minila_read_block(devc)) < 0) {
-		sr_err("%s: minila_read_block error: %d.", __func__, ret);
-		hw_dev_acquisition_stop(sdi, sdi);
-		return FALSE;
-	}
+    /* We need to get exactly NUM_BLOCKS blocks (i.e. 8MB) of data. */
+    if (devc->block_counter != (NUM_BLOCKS - 1)) {
+        devc->block_counter++;
+        return TRUE;
+    }
 
-	/* We need to get exactly NUM_BLOCKS blocks (i.e. 8MB) of data. */
-	if (devc->block_counter != (devc->limit_blocks - 1)) {
-		devc->block_counter++;
-		return TRUE;
-	}
+    sr_dbg("Sampling finished, sending data to session bus now.");
 
-	sr_dbg("Sampling finished, sending data to session bus now.");
+    /*
+     * All data was received and demangled, send it to the session bus.
+     *
+     * Note: Due to the method how data is spread across the 8MByte of
+     * SDRAM, we can _not_ send it to the session bus in a streaming
+     * manner while we receive it. We have to receive and de-mangle the
+     * full 8MByte first, only then the whole buffer contains valid data.
+     */
+    for (i = 0; i < NUM_BLOCKS; i++)
+        minila_send_block_to_session_bus(sdi, i);
 
-	/* All data was received and demangled, send it to the session bus. */
-	for (i = 0; i < devc->limit_blocks; i++)
-		minila_send_block_to_session_bus(devc, i);
+    dev_acquisition_stop(sdi);
 
-	hw_dev_acquisition_stop(sdi, sdi);
-
-	g_free(devc->final_buf);
-
-	return TRUE;
+    return TRUE;
 }
 
-static int hw_dev_acquisition_start(const struct sr_dev_inst *sdi,
-				    void *cb_data)
+static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
-	struct sr_datafeed_packet packet;
-	struct sr_datafeed_header header;
-	struct sr_datafeed_meta_logic meta;
+    struct dev_context *devc;
 
-	if (!(devc = sdi->priv)) {
-		sr_err("%s: sdi->priv was NULL.", __func__);
-		return SR_ERR_BUG;
-	}
+    if (sdi->status != SR_ST_ACTIVE)
+        return SR_ERR_DEV_CLOSED;
 
-	if (!devc->ftdic) {
-		sr_err("%s: devc->ftdic was NULL.", __func__);
-		return SR_ERR_BUG;
-	}
+    devc = sdi->priv;
 
-	devc->samplerate_index = minila_samplerate_to_index(devc->cur_samplerate);
-	if (devc->samplerate_index == 0xff) {
-		sr_err("%s: Invalid samplerate index.", __func__);
-		return SR_ERR;
-	}
+    if (!devc->ftdic) {
+        sr_err("devc->ftdic was NULL.");
+        return SR_ERR_BUG;
+    }
 
-	if (minila_configure_probes(sdi) != SR_OK) {
-		sr_err("Failed to configure probes.");
-		return SR_ERR;
-	}
+    devc->samplerate_index = minila_samplerate_to_index(sdi, devc->cur_samplerate);
+    if (devc->samplerate_index == 0xff) {
+        sr_err("Invalid samplerate index.");
+        return SR_ERR;
+    }
 
-	sr_dbg("Starting acquisition.");
+    if (minila_convert_trigger(sdi) != SR_OK) {
+        sr_err("Failed to configure trigger.");
+        return SR_ERR;
+    }
 
-	(void)minila_setup_and_run(devc);
+    sr_dbg("Starting acquisition.");
 
-	sr_dbg("Acquisition started successfully.");
+    (void)minila_setup_and_run(devc);
 
-	devc->session_dev_id = cb_data;
+    sr_dbg("Hardware acquisition started successfully.");
 
-	/* Send header packet to the session bus. */
-	sr_dbg("Sending SR_DF_HEADER.");
-	packet.type = SR_DF_HEADER;
-	packet.payload = &header;
-	header.feed_version = 1;
-	gettimeofday(&header.starttime, NULL);
-	sr_session_send(devc->session_dev_id, &packet);
+    std_session_send_df_header(sdi);
 
-	/* Send metadata about the SR_DF_LOGIC packets to come. */
-	packet.type = SR_DF_META_LOGIC;
-	packet.payload = &meta;
-	meta.samplerate = devc->cur_samplerate;
-	meta.num_probes = NUM_PROBES;
-	sr_session_send(devc->session_dev_id, &packet);
+    /* Time when we should be done (for detecting trigger timeouts). */
+    devc->done = (SR_MHZ(100) / devc->cur_samplerate) * devc->prof->trigger_constant +
+            g_get_monotonic_time() + (10 * G_TIME_SPAN_SECOND);
+    devc->block_counter = 0;
+    devc->trigger_found = 0;
 
-	/* Time when we should be done (for detecting trigger timeouts). */
-	devc->done = (SR_MHZ(100) / devc->cur_samplerate) * 0.08388608 + time(NULL)
-			+ devc->trigger_timeout;
-	devc->block_counter = 0;
-	devc->trigger_found = 0;
+	/* Hook up a dummy handler to receive data from the device. */
+	sr_session_source_add(sdi->session, -1, 0, 0, receive_data, (void *)sdi);
 
-	/* Hook up a dummy handler to receive data from the MINILA. */
-	sr_source_add(-1, G_IO_IN, 0, receive_data, (void *)sdi);
-
-	return SR_OK;
+    return SR_OK;
 }
 
-static int hw_dev_acquisition_stop(struct sr_dev_inst *sdi, void *cb_data)
+static int dev_acquisition_stop(struct sr_dev_inst *sdi)
 {
-	struct sr_datafeed_packet packet;
+    sr_dbg("Stopping acquisition.");
+    sr_session_source_remove(sdi->session, -1);
+    std_session_send_df_end(sdi);
 
-	(void)sdi;
-
-	sr_dbg("Stopping acquisition.");
-	sr_source_remove(-1);
-
-	/* Send end packet to the session bus. */
-	sr_dbg("Sending SR_DF_END.");
-	packet.type = SR_DF_END;
-	sr_session_send(cb_data, &packet);
-
-	return SR_OK;
+    return SR_OK;
 }
 
-SR_PRIV struct sr_dev_driver minila_mockup_driver_info = {
-	.name = "minila-mockup",
-	.longname = "miniLA USB Interface",
-	.api_version = 1,
-	.init = hw_init,
-	.cleanup = hw_cleanup,
-	.scan = hw_scan,
-	.dev_list = hw_dev_list,
-	.dev_clear = clear_instances,
-	.dev_open = hw_dev_open,
-	.dev_close = hw_dev_close,
-	.info_get = hw_info_get,
-	.dev_config_set = hw_dev_config_set,
-	.dev_acquisition_start = hw_dev_acquisition_start,
-	.dev_acquisition_stop = hw_dev_acquisition_stop,
-	.priv = NULL,
+static struct sr_dev_driver minila_mockup_driver_info = {
+    .name = "minila-mockup",
+    .longname = "miniLA USB Interface",
+    .api_version = 1,
+    .init = std_init,
+    .cleanup = std_cleanup,
+    .scan = scan,
+    .dev_list = std_dev_list,
+    .dev_clear = dev_clear,
+    .config_get = config_get,
+    .config_set = config_set,
+    .config_list = config_list,
+    .dev_open = dev_open,
+    .dev_close = dev_close,
+    .dev_acquisition_start = dev_acquisition_start,
+    .dev_acquisition_stop = dev_acquisition_stop,
+    .context = NULL,
 };
+SR_REGISTER_DEV_DRIVER(minila_mockup_driver_info);
