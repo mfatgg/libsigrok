@@ -1,7 +1,7 @@
 /*
  * This file is part of the sigrok project.
  *
- * Copyright (C) 2012 mfatgg <mfatgg00@gmail.com>
+ * Copyright (C) 2012-2016 mfatgg <mfatgg00@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,6 +20,9 @@
 
 /*
  * TODO:
+ *
+ * - update for libftdi version 1.0 (see minila_write_async and minila_async_complete)
+ * - verify with real hardware attached
  *
  * - verify received data with minila windows program + known hardware pattern on input
  * - separate WriteReg and ReadReg for FTDI
